@@ -47,11 +47,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return get_orders()
         elif path == 'list_products':
             return get_products()
+        elif path == 'list_feedback':
+            return get_feedback_messages()
     
     elif method == 'POST':
         body = json.loads(event.get('body', '{}'))
         if path == 'add_product':
             return add_product(body)
+        elif path == 'send_feedback_reply':
+            return send_feedback_reply(body)
     
     elif method == 'PUT':
         body = json.loads(event.get('body', '{}'))
@@ -391,6 +395,101 @@ def delete_product(product_id: int):
     conn.commit()
     cur.close()
     conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True}),
+        'isBase64Encoded': False
+    }
+
+
+def get_feedback_messages():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT id, telegram_user_id, telegram_username, customer_name,
+               message, admin_reply, is_replied, created_at, replied_at
+        FROM feedback_messages
+        ORDER BY is_replied ASC, created_at DESC
+    ''')
+    
+    messages = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    messages_list = []
+    for msg in messages:
+        msg_dict = dict(msg)
+        for key in ['created_at', 'replied_at']:
+            if msg_dict.get(key):
+                msg_dict[key] = msg_dict[key].isoformat()
+        messages_list.append(msg_dict)
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'messages': messages_list}),
+        'isBase64Encoded': False
+    }
+
+
+def send_feedback_reply(body: Dict[str, Any]):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    message_id = body.get('message_id')
+    admin_reply = body.get('admin_reply')
+    
+    cur.execute('''
+        SELECT telegram_user_id, customer_name, message
+        FROM feedback_messages
+        WHERE id = %s
+    ''', (message_id,))
+    
+    feedback = cur.fetchone()
+    
+    if not feedback:
+        cur.close()
+        conn.close()
+        return {
+            'statusCode': 404,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({'error': 'Message not found'}),
+            'isBase64Encoded': False
+        }
+    
+    replied_at = datetime.now()
+    
+    cur.execute('''
+        UPDATE feedback_messages
+        SET admin_reply = %s, is_replied = TRUE, replied_at = %s
+        WHERE id = %s
+    ''', (admin_reply, replied_at, message_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    notification_text = f'''📨 <b>Ответ от поддержки EasyShop</b>
+
+💬 <b>Ваш вопрос:</b>
+{feedback['message']}
+
+👤 <b>Ответ:</b>
+{admin_reply}'''
+    
+    send_telegram_notification(feedback['telegram_user_id'], notification_text)
     
     return {
         'statusCode': 200,

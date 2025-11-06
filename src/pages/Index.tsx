@@ -36,6 +36,18 @@ interface Product {
   emoji: string;
 }
 
+interface FeedbackMessage {
+  id: number;
+  telegram_user_id: number;
+  telegram_username: string;
+  customer_name: string;
+  message: string;
+  admin_reply: string;
+  is_replied: boolean;
+  created_at: string;
+  replied_at?: string;
+}
+
 const ADMIN_API_URL = 'https://functions.poehali.dev/b823eb44-8018-4191-b3f2-06bd4f9b653f';
 const BOT_WEBHOOK_URL = 'https://functions.poehali.dev/b73d3f99-ef4a-42f2-8003-47201a0b51f9';
 
@@ -50,6 +62,7 @@ const statusConfig: Record<OrderStatus, { label: string; color: string; emoji: s
 const Index = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [feedbackMessages, setFeedbackMessages] = useState<FeedbackMessage[]>([]);
   const [adminPassword, setAdminPassword] = useState('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -57,6 +70,8 @@ const Index = () => {
   const [lastOrderCount, setLastOrderCount] = useState(0);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [replyingTo, setReplyingTo] = useState<FeedbackMessage | null>(null);
+  const [replyText, setReplyText] = useState('');
 
   const loadOrders = async () => {
     if (!isAdminAuthenticated) return;
@@ -108,11 +123,34 @@ const Index = () => {
     }
   };
 
+  const loadFeedback = async () => {
+    if (!isAdminAuthenticated) return;
+
+    try {
+      const response = await fetch(`${ADMIN_API_URL}?action=list_feedback`, {
+        headers: {
+          'X-Admin-Password': adminPassword
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setFeedbackMessages(data.messages || []);
+      }
+    } catch (error) {
+      console.error('Error loading feedback:', error);
+    }
+  };
+
   useEffect(() => {
     if (isAdminAuthenticated) {
       loadOrders();
       loadProducts();
-      const interval = setInterval(loadOrders, 5000);
+      loadFeedback();
+      const interval = setInterval(() => {
+        loadOrders();
+        loadFeedback();
+      }, 5000);
       return () => clearInterval(interval);
     }
   }, [isAdminAuthenticated]);
@@ -270,6 +308,33 @@ const Index = () => {
     }
   };
 
+  const handleSendReply = async () => {
+    if (!replyingTo || !replyText.trim()) return;
+
+    try {
+      const response = await fetch(`${ADMIN_API_URL}?action=send_feedback_reply`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Password': adminPassword
+        },
+        body: JSON.stringify({
+          message_id: replyingTo.id,
+          admin_reply: replyText
+        })
+      });
+
+      if (response.ok) {
+        toast.success('Ответ отправлен клиенту');
+        setReplyingTo(null);
+        setReplyText('');
+        loadFeedback();
+      }
+    } catch (error) {
+      toast.error('Ошибка отправки ответа');
+    }
+  };
+
   const setupWebhook = async () => {
     const botToken = prompt('Введите токен бота от @BotFather:');
     if (!botToken) return;
@@ -368,9 +433,17 @@ const Index = () => {
             </div>
 
             <Tabs defaultValue="orders" className="w-full">
-              <TabsList className="grid w-full max-w-md mx-auto grid-cols-2 mb-6">
+              <TabsList className="grid w-full max-w-2xl mx-auto grid-cols-3 mb-6">
                 <TabsTrigger value="orders">📦 Заказы</TabsTrigger>
                 <TabsTrigger value="catalog">🛍️ Каталог</TabsTrigger>
+                <TabsTrigger value="feedback">
+                  💬 Обратная связь
+                  {feedbackMessages.filter(m => !m.is_replied).length > 0 && (
+                    <Badge className="ml-2 bg-red-500">
+                      {feedbackMessages.filter(m => !m.is_replied).length}
+                    </Badge>
+                  )}
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="orders">
@@ -575,6 +648,112 @@ const Index = () => {
                       </Card>
                     ))}
                   </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="feedback">
+                <div className="max-w-4xl mx-auto">
+                  <div className="mb-6">
+                    <h3 className="text-xl font-bold">Сообщения от клиентов</h3>
+                    <p className="text-sm text-gray-500">Непрочитанные сообщения отображаются первыми</p>
+                  </div>
+
+                  {feedbackMessages.length === 0 ? (
+                    <Card className="max-w-2xl mx-auto">
+                      <CardContent className="py-12 text-center">
+                        <div className="text-6xl mb-4">💬</div>
+                        <p className="text-gray-500 text-lg mb-2">Сообщений пока нет</p>
+                        <p className="text-sm text-gray-400">
+                          Клиенты могут написать через раздел "Обратная связь" в боте
+                        </p>
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <div className="space-y-4">
+                      {feedbackMessages.map((feedback) => (
+                        <Card key={feedback.id} className={`shadow-lg hover:shadow-xl transition-shadow ${
+                          !feedback.is_replied ? 'border-2 border-yellow-400' : ''
+                        }`}>
+                          <CardHeader>
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <CardTitle className="flex items-center gap-2 mb-2 flex-wrap">
+                                  {feedback.is_replied ? '✅' : '⏳'} {feedback.customer_name}
+                                  {!feedback.is_replied && (
+                                    <Badge className="bg-yellow-500 text-white">Ожидает ответа</Badge>
+                                  )}
+                                </CardTitle>
+                                <CardDescription>
+                                  {feedback.telegram_username && (
+                                    <>@{feedback.telegram_username} • </>
+                                  )}
+                                  {new Date(feedback.created_at).toLocaleString('ru-RU')}
+                                </CardDescription>
+                              </div>
+                            </div>
+                          </CardHeader>
+                          <CardContent className="space-y-4">
+                            <div>
+                              <Label className="text-xs text-gray-500">Сообщение клиента</Label>
+                              <div className="mt-1 p-3 bg-blue-50 rounded-lg text-sm">
+                                {feedback.message}
+                              </div>
+                            </div>
+
+                            {feedback.is_replied && feedback.admin_reply ? (
+                              <div>
+                                <Label className="text-xs text-gray-500">Ваш ответ</Label>
+                                <div className="mt-1 p-3 bg-green-50 rounded-lg text-sm">
+                                  {feedback.admin_reply}
+                                </div>
+                                {feedback.replied_at && (
+                                  <div className="text-xs text-gray-400 mt-1">
+                                    Отправлено: {new Date(feedback.replied_at).toLocaleString('ru-RU')}
+                                  </div>
+                                )}
+                              </div>
+                            ) : replyingTo?.id === feedback.id ? (
+                              <div className="space-y-2">
+                                <Label>Ваш ответ</Label>
+                                <Textarea
+                                  value={replyText}
+                                  onChange={(e) => setReplyText(e.target.value)}
+                                  placeholder="Напишите ответ клиенту..."
+                                  rows={4}
+                                />
+                                <div className="flex gap-2">
+                                  <Button onClick={handleSendReply} className="bg-green-600 hover:bg-green-700">
+                                    <Icon name="Send" className="mr-2" size={16} />
+                                    Отправить
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => {
+                                      setReplyingTo(null);
+                                      setReplyText('');
+                                    }}
+                                  >
+                                    Отмена
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <Button
+                                onClick={() => {
+                                  setReplyingTo(feedback);
+                                  setReplyText('');
+                                }}
+                                className="bg-gradient-to-r from-purple-600 to-pink-600"
+                              >
+                                <Icon name="MessageSquare" className="mr-2" size={16} />
+                                Ответить
+                              </Button>
+                            )}
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </TabsContent>
             </Tabs>

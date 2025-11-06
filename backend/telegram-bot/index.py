@@ -82,19 +82,28 @@ def send_telegram_message(chat_id: int, text: str, reply_markup: Optional[Dict] 
     urllib.request.urlopen(req)
 
 
+user_states = {}
+
 def process_message(message: Dict[str, Any]):
     chat_id = message['chat']['id']
     text = message.get('text', '')
     user = message['from']
     
     if text == '/start':
+        user_states.pop(chat_id, None)
         send_welcome(chat_id)
     elif text == '📦 Каталог':
+        user_states.pop(chat_id, None)
         send_catalog(chat_id)
     elif text == '💬 Обратная связь':
-        send_contact_info(chat_id)
+        user_states[chat_id] = 'awaiting_feedback'
+        send_feedback_prompt(chat_id)
     elif text == '📋 Мои заказы':
+        user_states.pop(chat_id, None)
         send_my_orders(chat_id, user['id'])
+    elif user_states.get(chat_id) == 'awaiting_feedback':
+        save_feedback_message(chat_id, user, text)
+        user_states.pop(chat_id, None)
     else:
         send_telegram_message(chat_id, '❓ Используйте кнопки меню для навигации')
 
@@ -154,6 +163,42 @@ def send_contact_info(chat_id: int):
 💬 <b>Telegram:</b> @easyshop_support
 
 Мы работаем с 9:00 до 21:00 (МСК)'''
+    
+    send_telegram_message(chat_id, text)
+
+
+def send_feedback_prompt(chat_id: int):
+    text = '''💬 <b>Обратная связь</b>
+
+Напишите ваше сообщение, и мы ответим вам в ближайшее время!
+
+Введите текст вашего вопроса или предложения:'''
+    
+    send_telegram_message(chat_id, text)
+
+
+def save_feedback_message(chat_id: int, user: Dict[str, Any], message_text: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    customer_name = user.get('first_name', 'Клиент')
+    username = user.get('username', '')
+    
+    cur.execute('''
+        INSERT INTO feedback_messages 
+        (telegram_user_id, telegram_username, customer_name, message)
+        VALUES (%s, %s, %s, %s)
+    ''', (user['id'], username, customer_name, message_text))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    text = '''✅ <b>Сообщение отправлено!</b>
+
+Спасибо за обращение! Мы получили ваше сообщение и ответим в ближайшее время.
+
+Используйте кнопки меню для продолжения работы.'''
     
     send_telegram_message(chat_id, text)
 
