@@ -91,6 +91,30 @@ def get_db_connection():
     return psycopg2.connect(database_url)
 
 
+def send_telegram_notification(chat_id: int, text: str):
+    import urllib.request
+    import urllib.parse
+    
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not bot_token:
+        return
+    
+    url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
+    
+    data = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    
+    try:
+        req_data = urllib.parse.urlencode(data).encode()
+        req = urllib.request.Request(url, data=req_data)
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+
 def get_orders():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -149,9 +173,16 @@ def get_products():
 
 def update_order_status(order_id: int, body: Dict[str, Any]):
     conn = get_db_connection()
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
     status = body.get('status')
+    
+    cur.execute('''
+        SELECT telegram_user_id, order_number, product_name, customer_name, end_date
+        FROM orders 
+        WHERE id = %s
+    ''', (order_id,))
+    order = cur.fetchone()
     
     if status in ['accepted', 'processing']:
         start_date = datetime.now()
@@ -166,6 +197,32 @@ def update_order_status(order_id: int, body: Dict[str, Any]):
         cur.execute('UPDATE orders SET status = %s WHERE id = %s', (status, order_id))
     
     conn.commit()
+    
+    if order:
+        status_messages = {
+            'pending': '⏳ Ваш заказ ожидает обработки',
+            'accepted': '💳 Ваш заказ принят! Ожидаем оплату',
+            'processing': '⚙️ Ваш заказ выполняется',
+            'completed': '✅ Ваш заказ выполнен и готов!',
+            'cancelled': '❌ Ваш заказ отменён'
+        }
+        
+        end_date_text = ''
+        if status in ['accepted', 'processing']:
+            end_date_str = (start_date + timedelta(days=3)).strftime('%d.%m.%Y')
+            end_date_text = f'\n📅 Ожидаемая дата готовности: {end_date_str}'
+        elif status == 'completed' and order.get('end_date'):
+            end_date_text = '\n\n🎉 Спасибо за заказ!'
+        
+        notification_text = f'''🔔 <b>Обновление статуса заказа</b>
+
+📦 Товар: {order['product_name']}
+📝 Заказ: #{order['order_number']}
+
+{status_messages.get(status, 'Статус обновлён')}{end_date_text}'''
+        
+        send_telegram_notification(order['telegram_user_id'], notification_text)
+    
     cur.close()
     conn.close()
     
@@ -203,12 +260,30 @@ def update_order_executor(order_id: int, executor: str):
 
 def update_order_end_date(order_id: int, end_date_str: str):
     conn = get_db_connection()
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT telegram_user_id, order_number, product_name
+        FROM orders 
+        WHERE id = %s
+    ''', (order_id,))
+    order = cur.fetchone()
     
     end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
     cur.execute('UPDATE orders SET end_date = %s WHERE id = %s', (end_date, order_id))
     
     conn.commit()
+    
+    if order:
+        notification_text = f'''🔔 <b>Обновлена дата готовности</b>
+
+📦 Товар: {order['product_name']}
+📝 Заказ: #{order['order_number']}
+
+📅 Новая дата готовности: {end_date.strftime('%d.%m.%Y')}'''
+        
+        send_telegram_notification(order['telegram_user_id'], notification_text)
+    
     cur.close()
     conn.close()
     
