@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "Test unauthorized access",
+      "method": "GET",
+      "path": "/?action=list_orders",
+      "expectedStatus": 401
+    },
+    {
+      "name": "Test get orders with auth",
+      "method": "GET",
+      "path": "/?action=list_orders",
+      "headers": {
+        "X-Admin-Password": "easyshop25"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "orders": "array"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
