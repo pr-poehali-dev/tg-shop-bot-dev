@@ -18,7 +18,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'statusCode': 200,
             'headers': {
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
                 'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Password',
                 'Access-Control-Max-Age': '86400'
             },
@@ -48,14 +48,32 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         elif path == 'list_products':
             return get_products()
     
+    elif method == 'POST':
+        body = json.loads(event.get('body', '{}'))
+        if path == 'add_product':
+            return add_product(body)
+    
     elif method == 'PUT':
         body = json.loads(event.get('body', '{}'))
+        
+        if path == 'update_product':
+            return update_product(body)
+        
         order_id = body.get('order_id')
         
         if 'status' in body:
             return update_order_status(order_id, body)
         elif 'executor' in body:
             return update_order_executor(order_id, body.get('executor'))
+        elif 'end_date' in body:
+            return update_order_end_date(order_id, body.get('end_date'))
+    
+    elif method == 'DELETE':
+        body = json.loads(event.get('body', '{}'))
+        if 'order_id' in body:
+            return delete_order(body.get('order_id'))
+        elif 'product_id' in body:
+            return delete_product(body.get('product_id'))
     
     return {
         'statusCode': 400,
@@ -167,6 +185,133 @@ def update_order_executor(order_id: int, executor: str):
     cur = conn.cursor()
     
     cur.execute('UPDATE orders SET executor = %s WHERE id = %s', (executor, order_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True}),
+        'isBase64Encoded': False
+    }
+
+
+def update_order_end_date(order_id: int, end_date_str: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+    cur.execute('UPDATE orders SET end_date = %s WHERE id = %s', (end_date, order_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True}),
+        'isBase64Encoded': False
+    }
+
+
+def delete_order(order_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('DELETE FROM orders WHERE id = %s', (order_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True}),
+        'isBase64Encoded': False
+    }
+
+
+def add_product(body: Dict[str, Any]):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    name = body.get('name')
+    description = body.get('description')
+    price = body.get('price')
+    emoji = body.get('emoji')
+    
+    cur.execute('''
+        INSERT INTO products (name, description, price, emoji)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+    ''', (name, description, price, emoji))
+    
+    product_id = cur.fetchone()[0]
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True, 'id': product_id}),
+        'isBase64Encoded': False
+    }
+
+
+def update_product(body: Dict[str, Any]):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    product_id = body.get('id')
+    name = body.get('name')
+    description = body.get('description')
+    price = body.get('price')
+    emoji = body.get('emoji')
+    
+    cur.execute('''
+        UPDATE products 
+        SET name = %s, description = %s, price = %s, emoji = %s
+        WHERE id = %s
+    ''', (name, description, price, emoji, product_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'success': True}),
+        'isBase64Encoded': False
+    }
+
+
+def delete_product(product_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('DELETE FROM products WHERE id = %s', (product_id,))
     
     conn.commit()
     cur.close()

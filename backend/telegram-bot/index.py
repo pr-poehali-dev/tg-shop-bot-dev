@@ -238,13 +238,20 @@ def show_product_details(chat_id: int, product_id: int, user: Dict[str, Any]):
         send_telegram_message(chat_id, '❌ Товар не найден')
         return
     
+    username = user.get('username', '')
+    username_text = f'@{username}' if username else 'не указан'
+    
     text = f'''{product['emoji']} <b>{product['name']}</b>
 
 {product['description']}
 
 💰 <b>Цена:</b> {product['price']:,} ₽
 
-Оформить заказ?'''
+📝 <b>Ваши данные для заказа:</b>
+👤 Имя: {user.get('first_name', 'Клиент')}
+📱 Username: {username_text}
+
+Оформить заказ с этими данными?'''
     
     reply_markup = {
         'inline_keyboard': [
