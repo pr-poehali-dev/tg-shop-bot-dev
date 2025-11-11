@@ -5,8 +5,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 
-ADMIN_USERNAME = 'skzry'
-
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     '''
     Business: Telegram bot webhook handler for EasyShop
@@ -86,7 +84,38 @@ def send_telegram_message(chat_id: int, text: str, reply_markup: Optional[Dict] 
 
 
 def is_admin(user: Dict[str, Any]) -> bool:
-    return user.get('username', '').lower() == ADMIN_USERNAME.lower()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('SELECT id FROM admins WHERE telegram_user_id = %s', (user['id'],))
+    result = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return result is not None
+
+
+def get_all_admins() -> List[int]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('SELECT telegram_user_id FROM admins')
+    admin_ids = [row[0] for row in cur.fetchall()]
+    
+    cur.close()
+    conn.close()
+    
+    return admin_ids
+
+
+def notify_admins(text: str):
+    admin_ids = get_all_admins()
+    for admin_id in admin_ids:
+        try:
+            send_telegram_message(admin_id, text)
+        except:
+            pass
 
 
 user_states = {}
@@ -106,7 +135,7 @@ def process_message(message: Dict[str, Any]):
         user_states.pop(chat_id, None)
         send_catalog(chat_id)
     elif text == '💬 Обратная связь':
-        user_states[chat_id] = 'awaiting_feedback'
+        user_states[chat_id] = {'type': 'awaiting_feedback'}
         send_feedback_prompt(chat_id)
     elif text == '📋 Мои заказы':
         user_states.pop(chat_id, None)
@@ -114,7 +143,7 @@ def process_message(message: Dict[str, Any]):
     elif text == '🔙 Назад':
         user_states.pop(chat_id, None)
         send_welcome(chat_id, user)
-    elif user_states.get(chat_id) == 'awaiting_feedback':
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_feedback':
         save_feedback_message(chat_id, user, text)
         user_states.pop(chat_id, None)
     elif user_states.get(chat_id, {}).get('type') == 'awaiting_product_name' and is_admin(user):
@@ -127,6 +156,16 @@ def process_message(message: Dict[str, Any]):
         handle_new_product_emoji(chat_id, text)
     elif user_states.get(chat_id, {}).get('type') == 'awaiting_feedback_reply' and is_admin(user):
         handle_feedback_reply(chat_id, text)
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_edit_product_name' and is_admin(user):
+        handle_edit_product_name(chat_id, text)
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_edit_product_description' and is_admin(user):
+        handle_edit_product_description(chat_id, text)
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_edit_product_price' and is_admin(user):
+        handle_edit_product_price(chat_id, text)
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_edit_product_emoji' and is_admin(user):
+        handle_edit_product_emoji(chat_id, text)
+    elif user_states.get(chat_id, {}).get('type') == 'awaiting_admin_username' and is_admin(user):
+        handle_add_admin(chat_id, text)
     else:
         send_telegram_message(chat_id, '❓ Используйте кнопки меню для навигации')
 
@@ -165,7 +204,8 @@ def send_admin_panel(chat_id: int):
     inline_keyboard = [
         [{'text': '📦 Все заказы', 'callback_data': 'admin_orders'}],
         [{'text': '💬 Обратная связь', 'callback_data': 'admin_feedback'}],
-        [{'text': '📦 Управление товарами', 'callback_data': 'admin_products'}],
+        [{'text': '🛍️ Управление товарами', 'callback_data': 'admin_products'}],
+        [{'text': '👥 Управление админами', 'callback_data': 'admin_admins'}],
         [{'text': '🔙 Назад', 'callback_data': 'admin_back'}]
     ]
     
@@ -276,6 +316,7 @@ def send_admin_order_details(chat_id: int, order_id: int):
             {'text': '⚙️ В работу', 'callback_data': f"order_processing_{order_id}"},
             {'text': '🎉 Завершить', 'callback_data': f"order_complete_{order_id}"}
         ],
+        [{'text': '🗑️ Удалить заказ', 'callback_data': f"order_delete_{order_id}"}],
         [{'text': '🔙 К списку', 'callback_data': 'admin_orders'}]
     ]
     
@@ -374,7 +415,7 @@ def send_admin_products(chat_id: int):
     cur.close()
     conn.close()
     
-    text = '📦 <b>Управление товарами</b>\n\n'
+    text = '🛍️ <b>Управление товарами</b>\n\n'
     
     inline_keyboard = []
     for product in products:
@@ -412,8 +453,105 @@ def send_admin_product_details(chat_id: int, product_id: int):
 💰 <b>Цена:</b> {product['price']:,} ₽'''
     
     inline_keyboard = [
-        [{'text': '🗑️ Удалить товар', 'callback_data': f"product_delete_{product_id}"}],
+        [{'text': '✏️ Редактировать', 'callback_data': f"product_edit_{product_id}"}],
+        [{'text': '🗑️ Удалить товар', 'callback_data': f"product_delete_confirm_{product_id}"}],
         [{'text': '🔙 К списку', 'callback_data': 'admin_products'}]
+    ]
+    
+    reply_markup = {'inline_keyboard': inline_keyboard}
+    send_telegram_message(chat_id, text, reply_markup)
+
+
+def send_product_edit_menu(chat_id: int, product_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('SELECT id, name, description, price, emoji FROM products WHERE id = %s', (product_id,))
+    product = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    if not product:
+        send_telegram_message(chat_id, '❌ Товар не найден')
+        return
+    
+    text = f'''✏️ <b>Редактирование товара</b>
+
+{product['emoji']} <b>{product['name']}</b>
+
+Что хотите изменить?'''
+    
+    inline_keyboard = [
+        [{'text': '📝 Название', 'callback_data': f"edit_product_name_{product_id}"}],
+        [{'text': '📄 Описание', 'callback_data': f"edit_product_desc_{product_id}"}],
+        [{'text': '💰 Цена', 'callback_data': f"edit_product_price_{product_id}"}],
+        [{'text': '🎨 Эмодзи', 'callback_data': f"edit_product_emoji_{product_id}"}],
+        [{'text': '🔙 Назад', 'callback_data': f"admin_product_{product_id}"}]
+    ]
+    
+    reply_markup = {'inline_keyboard': inline_keyboard}
+    send_telegram_message(chat_id, text, reply_markup)
+
+
+def send_admin_admins(chat_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT id, telegram_user_id, telegram_username, full_name, created_at
+        FROM admins
+        ORDER BY created_at
+    ''')
+    
+    admins = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    text = f'👥 <b>Управление админами</b>\n\nВсего админов: {len(admins)}\n\n'
+    
+    inline_keyboard = []
+    for admin in admins:
+        button_text = f"👤 {admin['full_name']} (@{admin['telegram_username'] or 'нет username'})"
+        inline_keyboard.append([{
+            'text': button_text,
+            'callback_data': f"admin_admin_{admin['id']}"
+        }])
+    
+    inline_keyboard.append([{'text': '➕ Добавить админа', 'callback_data': 'admin_admin_add'}])
+    inline_keyboard.append([{'text': '🔙 Назад', 'callback_data': 'admin_panel'}])
+    
+    reply_markup = {'inline_keyboard': inline_keyboard}
+    send_telegram_message(chat_id, text, reply_markup)
+
+
+def send_admin_admin_details(chat_id: int, admin_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT id, telegram_user_id, telegram_username, full_name, created_at
+        FROM admins
+        WHERE id = %s
+    ''', (admin_id,))
+    
+    admin = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not admin:
+        send_telegram_message(chat_id, '❌ Админ не найден')
+        return
+    
+    text = f'''👤 <b>Информация об админе</b>
+
+👤 <b>Имя:</b> {admin['full_name']}
+📱 <b>Username:</b> @{admin['telegram_username'] or 'не указан'}
+📅 <b>Добавлен:</b> {admin['created_at'].strftime('%d.%m.%Y %H:%M')}'''
+    
+    inline_keyboard = [
+        [{'text': '🗑️ Удалить админа', 'callback_data': f"admin_delete_{admin_id}"}],
+        [{'text': '🔙 К списку', 'callback_data': 'admin_admins'}]
     ]
     
     reply_markup = {'inline_keyboard': inline_keyboard}
@@ -471,9 +609,164 @@ def handle_new_product_emoji(chat_id: int, emoji: str):
 {product_data['description']}
 💰 {product_data['price']:,} ₽'''
     
-    inline_keyboard = [[{'text': '📦 К списку товаров', 'callback_data': 'admin_products'}]]
+    inline_keyboard = [[{'text': '🛍️ К списку товаров', 'callback_data': 'admin_products'}]]
     reply_markup = {'inline_keyboard': inline_keyboard}
     send_telegram_message(chat_id, text, reply_markup)
+
+
+def start_edit_product_name(chat_id: int, product_id: int):
+    user_states[chat_id] = {'type': 'awaiting_edit_product_name', 'product_id': product_id}
+    send_telegram_message(chat_id, '📝 Введите новое название товара:')
+
+
+def handle_edit_product_name(chat_id: int, name: str):
+    product_id = user_states[chat_id]['product_id']
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('UPDATE products SET name = %s WHERE id = %s', (name, product_id))
+    conn.commit()
+    
+    cur.close()
+    conn.close()
+    
+    user_states.pop(chat_id, None)
+    send_telegram_message(chat_id, '✅ Название обновлено!')
+    send_admin_product_details(chat_id, product_id)
+
+
+def start_edit_product_description(chat_id: int, product_id: int):
+    user_states[chat_id] = {'type': 'awaiting_edit_product_description', 'product_id': product_id}
+    send_telegram_message(chat_id, '📝 Введите новое описание товара:')
+
+
+def handle_edit_product_description(chat_id: int, description: str):
+    product_id = user_states[chat_id]['product_id']
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('UPDATE products SET description = %s WHERE id = %s', (description, product_id))
+    conn.commit()
+    
+    cur.close()
+    conn.close()
+    
+    user_states.pop(chat_id, None)
+    send_telegram_message(chat_id, '✅ Описание обновлено!')
+    send_admin_product_details(chat_id, product_id)
+
+
+def start_edit_product_price(chat_id: int, product_id: int):
+    user_states[chat_id] = {'type': 'awaiting_edit_product_price', 'product_id': product_id}
+    send_telegram_message(chat_id, '💰 Введите новую цену товара (только число):')
+
+
+def handle_edit_product_price(chat_id: int, price_text: str):
+    try:
+        price = int(price_text.replace(' ', '').replace(',', ''))
+        product_id = user_states[chat_id]['product_id']
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute('UPDATE products SET price = %s WHERE id = %s', (price, product_id))
+        conn.commit()
+        
+        cur.close()
+        conn.close()
+        
+        user_states.pop(chat_id, None)
+        send_telegram_message(chat_id, '✅ Цена обновлена!')
+        send_admin_product_details(chat_id, product_id)
+    except ValueError:
+        send_telegram_message(chat_id, '❌ Ошибка! Введите корректное число:')
+
+
+def start_edit_product_emoji(chat_id: int, product_id: int):
+    user_states[chat_id] = {'type': 'awaiting_edit_product_emoji', 'product_id': product_id}
+    send_telegram_message(chat_id, '🎨 Введите новый эмодзи для товара:')
+
+
+def handle_edit_product_emoji(chat_id: int, emoji: str):
+    product_id = user_states[chat_id]['product_id']
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('UPDATE products SET emoji = %s WHERE id = %s', (emoji, product_id))
+    conn.commit()
+    
+    cur.close()
+    conn.close()
+    
+    user_states.pop(chat_id, None)
+    send_telegram_message(chat_id, '✅ Эмодзи обновлен!')
+    send_admin_product_details(chat_id, product_id)
+
+
+def start_add_admin(chat_id: int):
+    user_states[chat_id] = {'type': 'awaiting_admin_username'}
+    send_telegram_message(chat_id, '''👥 <b>Добавление админа</b>
+
+Отправьте username пользователя в формате: @username
+
+Или перешлите любое сообщение от пользователя''')
+
+
+def handle_add_admin(chat_id: int, text: str):
+    username = text.strip().replace('@', '')
+    
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT telegram_user_id, telegram_username, customer_name
+        FROM orders
+        WHERE telegram_username = %s
+        LIMIT 1
+    ''', (username,))
+    
+    user_info = cur.fetchone()
+    
+    if not user_info:
+        cur.close()
+        conn.close()
+        send_telegram_message(chat_id, '❌ Пользователь с таким username не найден в системе.\n\nПопросите пользователя сначала создать хотя бы один заказ.')
+        user_states.pop(chat_id, None)
+        return
+    
+    cur.execute('SELECT id FROM admins WHERE telegram_user_id = %s', (user_info['telegram_user_id'],))
+    existing = cur.fetchone()
+    
+    if existing:
+        cur.close()
+        conn.close()
+        send_telegram_message(chat_id, '❌ Этот пользователь уже является админом!')
+        user_states.pop(chat_id, None)
+        return
+    
+    cur.execute('''
+        INSERT INTO admins (telegram_user_id, telegram_username, full_name)
+        VALUES (%s, %s, %s)
+    ''', (user_info['telegram_user_id'], user_info['telegram_username'], user_info['customer_name']))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    user_states.pop(chat_id, None)
+    
+    send_telegram_message(chat_id, f'''✅ <b>Админ добавлен!</b>
+
+👤 @{username} теперь администратор
+Команда для входа: /admin''')
+    
+    send_telegram_message(user_info['telegram_user_id'], '''🎉 <b>Вы назначены администратором EasyShop!</b>
+
+Теперь вы можете управлять магазином.
+Используйте команду /admin для доступа к админ-панели.''')
 
 
 def start_feedback_reply(chat_id: int, message_id: int):
@@ -515,7 +808,6 @@ def handle_feedback_reply(chat_id: int, reply_text: str):
 {reply_text}'''
         
         send_telegram_message(feedback['telegram_user_id'], notification_text)
-        send_telegram_message(chat_id, '✅ Ответ отправлен клиенту!')
     
     cur.close()
     conn.close()
@@ -666,9 +958,34 @@ def process_callback(callback_query: Dict[str, Any]):
         send_admin_product_details(chat_id, product_id)
     elif callback_data == 'admin_product_add' and is_admin(user):
         start_add_product(chat_id)
-    elif callback_data.startswith('product_delete_') and is_admin(user):
+    elif callback_data.startswith('product_edit_') and is_admin(user):
         product_id = int(callback_data.split('_')[2])
+        send_product_edit_menu(chat_id, product_id)
+    elif callback_data.startswith('edit_product_name_') and is_admin(user):
+        product_id = int(callback_data.split('_')[3])
+        start_edit_product_name(chat_id, product_id)
+    elif callback_data.startswith('edit_product_desc_') and is_admin(user):
+        product_id = int(callback_data.split('_')[3])
+        start_edit_product_description(chat_id, product_id)
+    elif callback_data.startswith('edit_product_price_') and is_admin(user):
+        product_id = int(callback_data.split('_')[3])
+        start_edit_product_price(chat_id, product_id)
+    elif callback_data.startswith('edit_product_emoji_') and is_admin(user):
+        product_id = int(callback_data.split('_')[3])
+        start_edit_product_emoji(chat_id, product_id)
+    elif callback_data.startswith('product_delete_confirm_') and is_admin(user):
+        product_id = int(callback_data.split('_')[3])
         delete_product(chat_id, product_id)
+    elif callback_data == 'admin_admins' and is_admin(user):
+        send_admin_admins(chat_id)
+    elif callback_data.startswith('admin_admin_') and is_admin(user):
+        admin_id = int(callback_data.split('_')[2])
+        send_admin_admin_details(chat_id, admin_id)
+    elif callback_data == 'admin_admin_add' and is_admin(user):
+        start_add_admin(chat_id)
+    elif callback_data.startswith('admin_delete_') and is_admin(user):
+        admin_id = int(callback_data.split('_')[2])
+        delete_admin(chat_id, admin_id)
     elif callback_data.startswith('order_accept_') and is_admin(user):
         order_id = int(callback_data.split('_')[2])
         update_order_status(chat_id, order_id, 'accepted')
@@ -681,8 +998,13 @@ def process_callback(callback_query: Dict[str, Any]):
     elif callback_data.startswith('order_complete_') and is_admin(user):
         order_id = int(callback_data.split('_')[2])
         update_order_status(chat_id, order_id, 'completed')
+    elif callback_data.startswith('order_delete_') and is_admin(user):
+        order_id = int(callback_data.split('_')[2])
+        delete_order(chat_id, order_id)
     elif callback_data == 'admin_back' and is_admin(user):
         send_welcome(chat_id, user)
+    elif callback_data == 'back_to_catalog':
+        send_catalog(chat_id)
     elif callback_data.startswith('product_'):
         product_id = int(callback_data.split('_')[1])
         show_product_details(chat_id, product_id, user)
@@ -723,6 +1045,20 @@ def update_order_status(chat_id: int, order_id: int, new_status: str):
     conn.close()
 
 
+def delete_order(chat_id: int, order_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('DELETE FROM orders WHERE id = %s', (order_id,))
+    conn.commit()
+    
+    cur.close()
+    conn.close()
+    
+    send_telegram_message(chat_id, '✅ Заказ удален!')
+    send_admin_orders(chat_id)
+
+
 def delete_product(chat_id: int, product_id: int):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -735,6 +1071,20 @@ def delete_product(chat_id: int, product_id: int):
     
     send_telegram_message(chat_id, '✅ Товар удален!')
     send_admin_products(chat_id)
+
+
+def delete_admin(chat_id: int, admin_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('DELETE FROM admins WHERE id = %s', (admin_id,))
+    conn.commit()
+    
+    cur.close()
+    conn.close()
+    
+    send_telegram_message(chat_id, '✅ Админ удален!')
+    send_admin_admins(chat_id)
 
 
 def show_product_details(chat_id: int, product_id: int, user: Dict[str, Any]):
@@ -809,3 +1159,14 @@ def create_order(chat_id: int, product_id: int, user: Dict[str, Any]):
 Отслеживайте статус в разделе "Мои заказы".'''
     
     send_telegram_message(chat_id, text)
+    
+    admin_notification = f'''🔔 <b>Получен новый заказ!</b>
+
+📋 Номер: #{order_number}
+👤 Клиент: {customer_name} (@{username or 'нет username'})
+📦 Товар: {product['name']}
+💰 Сумма: {product['price']:,} ₽
+
+Откройте /admin для управления заказом.'''
+    
+    notify_admins(admin_notification)
